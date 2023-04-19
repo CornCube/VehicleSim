@@ -28,13 +28,13 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
     first_gps = take!(gps_channel)
     @info "First GPS: $first_gps"
 
-    # convert 
+    # TODO: publish the seg in some file to a channel that I can access here
 
     x0 = zeros(13)
-    x0[1:3] .= [0.0, 0.0, 1.0]      # position (xyz)
-    x0[4:7] .= [1.0, 0.0, 0.0, 0.0] # quaternion
-    x0[8:10] .= [0.0, 0.0, 0.0]     # velocity
-    x0[11:13] .= [0.0, 0.0, 0.0]    # angular_velocity
+    x0[1:3] .= [first_gps.lat, first_gps.long, 1.0]    # position (xyz)
+    x0[4:7] .= [1.0, 0.0, 0.0, 0.0]                    # quaternion
+    x0[8:10] .= [0.0, 0.0, 0.0]                        # velocity
+    x0[11:13] .= [0.0, 0.0, 0.0]                       # angular_velocity
 
     x = x0
     last_update = 0.0
