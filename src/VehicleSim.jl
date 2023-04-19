@@ -27,6 +27,6 @@ include("client.jl")
 include("map.jl")
 include("localization.jl")
 
-export server, shutdown!, keyboard_client
+export server, shutdown!, keyboard_client, test_client
 
 end
