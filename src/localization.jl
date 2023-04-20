@@ -25,17 +25,27 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
     @info "Starting localization"
 
     # initial state of vehicle
+    x0 = zeros(13)
     first_gps = take!(gps_channel)
     @info "First GPS: $first_gps"
 
-    # TODO: publish the seg in some file to a channel that I can access here
+    cur_seg = get_cur_segment([first_gps.lat, first_gps.long])
+    @info "Current segment: $cur_seg"
 
-    x0 = zeros(13)
-    x0[1:3] .= [first_gps.lat, first_gps.long, 1.0]    # position (xyz)
-    x0[4:7] .= [1.0, 0.0, 0.0, 0.0]                    # quaternion
-    x0[8:10] .= [0.0, 0.0, 0.0]                        # velocity
-    x0[11:13] .= [0.0, 0.0, 0.0]                       # angular_velocity
+    θ = get_direction(cur_seg)
 
+    # rotation matrix from segment to world frame
+    R = RotZ(θ)
+
+    # get quaternion from rotation matrix
+    qw = sqrt(1 + R[1,1] + R[2,2] + R[3,3]) / 2
+    qx = (R[3,2] - R[2,3]) / (4 * qw)
+    qy = (R[1,3] - R[3,1]) / (4 * qw)
+    qz = (R[2,1] - R[1,2]) / (4 * qw)
+    x0[4:7] = [qw, qx, qy, qz]
+
+    x0[1:2] = [first_gps.lat, first_gps.long]
+    x0[3] = 1.0 
     x = x0
     last_update = 0.0
 
@@ -126,7 +136,7 @@ end
 
 # -------------------------------- EKF functions -------------------------------- #
 # process model
-function f(x, Δt)
+function f1(x, Δt)
     position = x[1:3]
     quaternion = x[4:7]
     velocity = x[8:10]
@@ -202,7 +212,7 @@ function jac_hx(x, z)
 end
 
 # convert z to a vector
-function convertz(z)
+function z_to_vec(z)
     if z isa GPSMeasurement
         return [z.lat; z.long]
     elseif z isa IMUMeasurement
@@ -215,21 +225,68 @@ end
 
 function filter(x, z, P, Q, R, Δ)
     # predict
-    x̂ = f(x, Δ)
+    x̂ = f1(x, Δ)
     F = jac_fx(x, Δ)
     P̂ = F * P * F' + Q
 
     # update
-    convert = convertz(z)
+    z_vec = z_to_vec(z)
 
-    y = convert - h(x̂, z)
+    y = z_vec - h(x̂, z)
     H = jac_hx(x̂, z)
     S = H * P̂ * H' + R
     K = P̂ * H' * inv(S)
 
     x = x̂ + K * y
     P = (I - K * H) * P̂
-    @info "x: $x"
+    # @info "x: $x"
 
     return x, P
+end
+
+
+# -------------------------------- Segment functions -------------------------------- #
+function get_cur_segment(position)
+    all_segments = training_map()
+
+    for (id, road_segment) in all_segments
+        left_lane_boundary = road_segment.lane_boundaries[1]
+        right_lane_boundary = road_segment.lane_boundaries[2]
+
+        lx1, ly1 = left_lane_boundary.pt_a[1], left_lane_boundary.pt_a[2]
+        lx2, ly2 = left_lane_boundary.pt_b[1], left_lane_boundary.pt_b[2]
+
+        rx1, ry1 = right_lane_boundary.pt_a[1], right_lane_boundary.pt_a[2]
+        rx2, ry2 = right_lane_boundary.pt_b[1], right_lane_boundary.pt_b[2]
+
+        left_slope = (ly2 - ly1) / (lx2 - lx1)
+        right_slope = (ry2 - ry1) / (rx2 - rx1)
+
+        left_y_intercept = left_lane_boundary.pt_a[2] - left_slope * left_lane_boundary.pt_a[1]
+        right_y_intercept = right_lane_boundary.pt_a[2] - right_slope * right_lane_boundary.pt_a[1]
+
+        # Compute distance from point to each line
+        left_distance = abs(left_slope*position[1] + position[2] + left_y_intercept) / sqrt(left_slope^2 + 1)
+        right_distance = abs(right_slope*position[1] + position[2] + right_y_intercept) / sqrt(right_slope^2 + 1)
+
+        # Compute distance between the lines
+        lines_distance = abs(right_y_intercept - left_y_intercept) / sqrt((left_slope - right_slope)^2 + 1)
+
+        # Check if the point is between the lines
+        if left_distance + right_distance <= lines_distance + 0.1
+            return id
+        end
+    end
+
+    error("No segment found")
+end
+
+function get_direction(id)
+    all_segments = training_map()
+    cur_segment = all_segments[id]
+
+    lane_boundary = cur_segment.lane_boundaries[1]
+    delta = lane_boundary.pt_b - lane_boundary.pt_a
+    dir = delta / norm(delta)
+    atan(dir[2], dir[1])
 end
