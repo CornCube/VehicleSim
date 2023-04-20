@@ -29,9 +29,6 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
     first_gps = take!(gps_channel)
     @info "First GPS: $first_gps"
 
-    # cur_seg = get_cur_segment([first_gps.lat, first_gps.long])
-    # @info "Current segment: $cur_seg"
-
     θ = first_gps.heading
 
     # rotation matrix from segment to world frame
@@ -63,13 +60,13 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
 
     # measurement noise for both GPS and IMU
     R_gps = Diagonal([3.0, 3.0, 1.0])
-    R_imu = 0.1 * I(6) # 0.01?
+    R_imu = 0.01 * I(6) # 0.01?
 
     @info "Starting localization loop"
 
     # Set up algorithm / initialize variables
     while true
-        sleep(0.001) # prevent thread from hogging resources & freezing other threads
+        sleep(0.001)
         isready(shutdown_channel) && break
         fresh_gps_meas = []
         while isready(gps_channel)
@@ -123,6 +120,7 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
 end
 
 
+# for computing the imu transform
 function custom_roty(θ)
     R = zeros(3, 3)
     R = [cos(θ) 0 sin(θ); 0 1 0; -sin(θ) 0 cos(θ)]
@@ -138,43 +136,7 @@ end
 
 
 # -------------------------------- EKF functions -------------------------------- #
-# process model
-function f1(x, Δt)
-    position = x[1:3]
-    quaternion = x[4:7]
-    velocity = x[8:10]
-    angular_vel = x[11:13]
-
-    r = angular_vel
-    mag = norm(r)
-
-    if mag < 1e-5
-        sᵣ = 1.0
-        vᵣ = zeros(3)
-    else
-        sᵣ = cos(mag*Δt / 2.0)
-        vᵣ = sin(mag*Δt / 2.0) * (r / mag)
-    end
-
-    sₙ = quaternion[1]
-    vₙ = quaternion[2:4]
-
-    s = sₙ*sᵣ - vₙ'*vᵣ
-    v = sₙ*vᵣ+sᵣ*vₙ+vₙ×vᵣ
-
-    R = Rot_from_quat(quaternion)  
-
-    new_position = position + Δt * R * velocity
-    new_quaternion = [s; v]
-    new_velocity = velocity
-    new_angular_vel = angular_vel
-    return [new_position; new_quaternion; new_velocity; new_angular_vel]
-end
-
-function jac_fx(x, Δ)
-    # take the gradient of f with respect to x
-    jacobian(x -> f(x, Δ), x)[1]
-end
+# process model in measurements.jl
 
 # measurement model
 function h(x, z)
@@ -210,8 +172,8 @@ function h(x, z)
     end
 end
 
+# jacobian of h with respect to x
 function jac_hx(x, z)
-    # take the gradient of h with respect to x
     jacobian(x -> h(x, z), x)[1]
 end
 
@@ -226,11 +188,11 @@ function z_to_vec(z)
     end
 end
 
-
+# extended kalman filter
 function filter(x, z, P, Q, R, Δ)
     # predict
-    x̂ = f1(x, Δ)
-    F = jac_fx(x, Δ)
+    x̂ = f(x, Δ)
+    F = Jac_x_f(x, Δ)
     P̂ = F * P * F' + Q
 
     # update
@@ -280,12 +242,3 @@ function get_cur_segment(position)
     error("No segment found")
 end
 
-function get_direction(id)
-    all_segments = training_map()
-    cur_segment = all_segments[id]
-
-    lane_boundary = cur_segment.lane_boundaries[1]
-    delta = lane_boundary.pt_b - lane_boundary.pt_a
-    dir = delta / norm(delta)
-    atan(dir[2], dir[1])
-end
