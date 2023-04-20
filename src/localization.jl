@@ -29,10 +29,10 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
     first_gps = take!(gps_channel)
     @info "First GPS: $first_gps"
 
-    cur_seg = get_cur_segment([first_gps.lat, first_gps.long])
-    @info "Current segment: $cur_seg"
+    # cur_seg = get_cur_segment([first_gps.lat, first_gps.long])
+    # @info "Current segment: $cur_seg"
 
-    θ = get_direction(cur_seg)
+    θ = first_gps.heading
 
     # rotation matrix from segment to world frame
     R = RotZ(θ)
@@ -51,8 +51,8 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
 
     P = zeros(13, 13)
     diag_vals = [
-        100.0, 100.0, 0.0, 
-        0.5, 0.5, 0.5, 0.5, 
+        1.0, 1.0, 1.0, 
+        0.1, 0.1, 0.1, 0.1, 
         0.1, 0.1, 0.1, 
         0.1, 0.1, 0.1
     ]
@@ -62,8 +62,8 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
     Q = 0.1 * I(13)
 
     # measurement noise for both GPS and IMU
-    R_gps = 1 * I(2)
-    R_imu = 0.01 * I(6)
+    R_gps = Diagonal([3.0, 3.0, 1.0])
+    R_imu = 0.1 * I(6) # 0.01?
 
     @info "Starting localization loop"
 
@@ -85,17 +85,20 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
         # process measurements
         while length(fresh_gps_meas) > 0 && length(fresh_imu_meas) > 0
             sleep(0.001)
-            # check what measurement is fresher
-            if fresh_gps_meas[1].time < fresh_imu_meas[1].time
-                z = fresh_gps_meas[1]
-                Δ = z.time - last_update
-                last_update = z.time
-                popfirst!(fresh_gps_meas)
-            else
-                z = fresh_imu_meas[1]
-                Δ = z.time - last_update
-                last_update = z.time
-                popfirst!(fresh_imu_meas)
+            # grab measurements and sort them by time
+            all_meas = [fresh_gps_meas..., fresh_imu_meas...]
+            sort!(all_meas, by = m -> m.time)
+
+            # Process the earliest measurement
+            z = all_meas[1]
+            Δ = z.time - last_update
+            last_update = z.time
+
+            # Remove the processed measurement from the respective list
+            if z isa GPSMeasurement
+                fresh_gps_meas = fresh_gps_meas[2:end]
+            elseif z isa IMUMeasurement
+                fresh_imu_meas = fresh_imu_meas[2:end]
             end
 
             # @info "Processing measurement of type $(typeof(z))"
@@ -150,7 +153,7 @@ function f1(x, Δt)
         vᵣ = zeros(3)
     else
         sᵣ = cos(mag*Δt / 2.0)
-        vᵣ = sin(mag*Δt / 2.0) * r/mag
+        vᵣ = sin(mag*Δt / 2.0) * (r / mag)
     end
 
     sₙ = quaternion[1]
@@ -159,7 +162,9 @@ function f1(x, Δt)
     s = sₙ*sᵣ - vₙ'*vᵣ
     v = sₙ*vᵣ+sᵣ*vₙ+vₙ×vᵣ
 
-    new_position = position + Δt * velocity
+    R = Rot_from_quat(quaternion)  
+
+    new_position = position + Δt * R * velocity
     new_quaternion = [s; v]
     new_velocity = velocity
     new_angular_vel = angular_vel
@@ -174,18 +179,17 @@ end
 # measurement model
 function h(x, z)
     if z isa GPSMeasurement
-        # convert to body frame
         T = get_gps_transform()
         gps_loc_body = T*[zeros(3); 1.0]
+        xyz_body = x[1:3] # position
+        q_body = x[4:7] # quaternion
 
-        xyz_body = x[1:3]
-        q_body = x[4:7]
         Tbody = get_body_transform(q_body, xyz_body)
         xyz_gps = Tbody * [gps_loc_body; 1]
+        yaw = extract_yaw_from_quaternion(q_body)
+        meas = [xyz_gps[1:2]; yaw]
 
-        # need to return a gps frame, which is the location of the body frame
-        return xyz_gps[1:2]
-
+        return meas
     elseif z isa IMUMeasurement
         # convert to body frame
         T_body_imu = get_imu_transform1()
@@ -214,7 +218,7 @@ end
 # convert z to a vector
 function z_to_vec(z)
     if z isa GPSMeasurement
-        return [z.lat; z.long]
+        return [z.lat; z.long; z.heading]
     elseif z isa IMUMeasurement
         return [z.linear_vel; z.angular_vel]
     else
@@ -237,11 +241,11 @@ function filter(x, z, P, Q, R, Δ)
     S = H * P̂ * H' + R
     K = P̂ * H' * inv(S)
 
-    x = x̂ + K * y
+    x̂ = x̂ + K * y
     P = (I - K * H) * P̂
-    # @info "x: $x"
+    @info "x: $x"
 
-    return x, P
+    return x̂, P
 end
 
 
@@ -259,21 +263,16 @@ function get_cur_segment(position)
         rx1, ry1 = right_lane_boundary.pt_a[1], right_lane_boundary.pt_a[2]
         rx2, ry2 = right_lane_boundary.pt_b[1], right_lane_boundary.pt_b[2]
 
-        left_slope = (ly2 - ly1) / (lx2 - lx1)
-        right_slope = (ry2 - ry1) / (rx2 - rx1)
+        xmin = min([lx1, lx2, rx1, rx2]...)
+        xmax = max([lx1, lx2, rx1, rx2]...)
+        ymin = min([ly1, ly2, ry1, ry2]...)
+        ymax = max([ly1, ly2, ry1, ry2]...)
 
-        left_y_intercept = left_lane_boundary.pt_a[2] - left_slope * left_lane_boundary.pt_a[1]
-        right_y_intercept = right_lane_boundary.pt_a[2] - right_slope * right_lane_boundary.pt_a[1]
+        x = position[1]
+        y = position[2]
 
-        # Compute distance from point to each line
-        left_distance = abs(left_slope*position[1] + position[2] + left_y_intercept) / sqrt(left_slope^2 + 1)
-        right_distance = abs(right_slope*position[1] + position[2] + right_y_intercept) / sqrt(right_slope^2 + 1)
-
-        # Compute distance between the lines
-        lines_distance = abs(right_y_intercept - left_y_intercept) / sqrt((left_slope - right_slope)^2 + 1)
-
-        # Check if the point is between the lines
-        if left_distance + right_distance <= lines_distance + 0.1
+        if (x <= xmax && x >= xmin && y <= ymax && y >= ymin)
+            @info "id: $id"
             return id
         end
     end
