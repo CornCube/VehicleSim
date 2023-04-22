@@ -30,8 +30,6 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
     @info "First GPS: $first_gps"
 
     θ = first_gps.heading
-
-    # rotation matrix from segment to world frame
     R = RotZ(θ)
 
     # get quaternion from rotation matrix
@@ -46,12 +44,13 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
     x = x0
     last_update = 0.0
 
+    # covariance matrix
     P = zeros(13, 13)
     diag_vals = [
-        1.0, 1.0, 1.0, 
+        2.0, 2.0, 2.0, 
         0.1, 0.1, 0.1, 0.1, 
-        0.1, 0.1, 0.1, 
-        0.1, 0.1, 0.1
+        1.0, 1.0, 1.0, 
+        1.0, 1.0, 1.0
     ]
     P = diagm(diag_vals)
 
@@ -127,6 +126,7 @@ function custom_roty(θ)
     return R
 end
 
+# differentiable imu
 function get_imu_transform1()
     R_imu_to_body = custom_roty(0.02)
     t_imu_to_body = [0, 0, 0.7]
@@ -205,13 +205,14 @@ function filter(x, z, P, Q, R, Δ)
 
     x̂ = x̂ + K * y
     P = (I - K * H) * P̂
-    @info "x: $x"
+    # @info "x: $x"
 
     return x̂, P
 end
 
 
 # -------------------------------- Segment functions -------------------------------- #
+# get the current segment (runs on spawn)
 function get_cur_segment(position)
     all_segments = training_map()
 
